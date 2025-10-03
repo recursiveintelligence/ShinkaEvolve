@@ -10,6 +10,7 @@ fallback is used to ensure evaluation can still run.
 """
 
 import math
+import time
 from typing import Optional
 
 import torch
@@ -287,8 +288,50 @@ def run_sdpa(
     Returns a tuple of (outputs, reported_score). Shinka will evolve only the
     implementation inside the EVOLVE-BLOCK above.
     """
-    out = pure_scaled_dot_product_attention(q=q, k=k, v=v, is_causal=is_causal, scale=scale)
+    # Measure latency and memory; prefer accurate CUDA stats when available.
+    B, H, TQ, D = q.shape
+    TK = k.shape[2]
+
+    used_triton = bool(TRITON_AVAILABLE and torch.cuda.is_available())
+    latency_ms: float
+    peak_mem_bytes: int
+
+    if used_triton:
+        device = torch.device("cuda")
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats(device)
+        t0 = time.perf_counter()
+        out = pure_scaled_dot_product_attention(
+            q=q, k=k, v=v, is_causal=is_causal, scale=scale
+        )
+        torch.cuda.synchronize()
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        peak_mem_bytes = int(torch.cuda.max_memory_allocated(device))
+    else:
+        # CPU fallback timing and a conservative memory estimate
+        t0 = time.perf_counter()
+        out = pure_scaled_dot_product_attention(
+            q=q, k=k, v=v, is_causal=is_causal, scale=scale
+        )
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        # Approximate working set of naive SDPA (float32): Q + K + V + logits + attn + out
+        elem_bytes = 4
+        est_bytes = (
+            B * H * (TQ * D + TK * D + TK * D + TQ * TK + TQ * TK + TQ * D) * elem_bytes
+        )
+        peak_mem_bytes = int(est_bytes)
+
     # Provide a simple, consistent scalar score (used by evaluator as a sanity signal)
     reported_score = float(out.abs().mean().item())
-    return out, reported_score
-
+    perf = {
+        "latency_ms": float(latency_ms),
+        "peak_mem_bytes": int(peak_mem_bytes),
+        "used_triton": used_triton,
+        "device": "cuda" if used_triton else "cpu",
+        "B": int(B),
+        "H": int(H),
+        "TQ": int(TQ),
+        "TK": int(TK),
+        "D": int(D),
+    }
+    return out, reported_score, perf

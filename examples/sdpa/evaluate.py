@@ -90,10 +90,14 @@ def validate_sdpa_result(result: Any) -> Tuple[bool, Optional[str]]:
         return False, "Received more results than expected"
     VALIDATION_STATE["index"] += 1
 
-    if not isinstance(result, tuple) or len(result) != 2:
-        return False, "Result must be a tuple: (outputs, reported_score)"
+    if not isinstance(result, tuple) or len(result) not in (2, 3):
+        return False, "Result must be a tuple: (outputs, reported_score[, perf_dict])"
 
-    outputs, reported_score = result
+    if len(result) == 2:
+        outputs, reported_score = result
+        perf = None
+    else:
+        outputs, reported_score, perf = result
 
     # Accept both numpy arrays and torch tensors
     if isinstance(outputs, np.ndarray):
@@ -116,6 +120,18 @@ def validate_sdpa_result(result: Any) -> Tuple[bool, Optional[str]]:
     except Exception:
         return False, "Reported score must be a finite float"
 
+    # If perf is present, sanity check expected keys
+    if perf is not None:
+        if not isinstance(perf, dict):
+            return False, "perf must be a dict if provided"
+        for k in ("latency_ms", "peak_mem_bytes"):
+            if k not in perf:
+                return False, f"perf missing required key: {k}"
+            try:
+                _ = float(perf[k])
+            except Exception:
+                return False, f"perf[{k}] must be numeric"
+
     return True, None
 
 
@@ -126,15 +142,47 @@ def aggregate_sdpa_metrics(
     if not results:
         return {"combined_score": 0.0, "error": "No results to aggregate"}
 
+    # Weights: prioritize speed and memory
+    SPEED_W, MEMORY_W, ACCURACY_W = 0.6, 0.3, 0.1
+
+    def _estimate_naive_bytes(B: int, H: int, TQ: int, TK: int, D: int, elem_bytes: int = 4) -> int:
+        # Rough working set for naive SDPA in float32: Q + K + V + logits + attn + out
+        return int(elem_bytes * (B * H * (TQ * D + TK * D + TK * D + TQ * TK + TQ * TK + TQ * D)))
+
+    def _time_reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, is_causal: bool) -> float:
+        # Warmup + timed mean (ms) on CPU
+        for _ in range(1):
+            _ = _torch_reference_sdpa(q, k, v, is_causal)
+        import time as _time
+        t0 = _time.perf_counter()
+        for _ in range(3):
+            _ = _torch_reference_sdpa(q, k, v, is_causal)
+        t1 = _time.perf_counter()
+        return float((t1 - t0) / 3.0 * 1000.0)
+
     rmses: List[float] = []
     reported_scores: List[float] = []
-    recomputed_scores: List[float] = []
+    accuracy_scores: List[float] = []
     max_abs_errors: List[float] = []
+    cand_latencies_ms: List[float] = []
+    ref_latencies_ms: List[float] = []
+    speedups: List[float] = []
+    cand_peak_mem: List[float] = []
+    ref_mem_est: List[float] = []
+    mem_savings: List[float] = []
 
     extras: List[Dict[str, Any]] = []
 
-    for idx, (outputs, reported_score) in enumerate(results):
+    for idx, item in enumerate(results):
+        # Unpack allowing optional perf dict in third element
+        if len(item) == 2:
+            outputs, reported_score = item
+            perf = None
+        else:
+            outputs, reported_score, perf = item
+
         ref = REFERENCE_OUTPUTS[idx]
+        # Accuracy vs reference
         if isinstance(outputs, torch.Tensor):
             out = outputs.detach().cpu().to(torch.float64)
             ref64 = ref.to(torch.float64)
@@ -148,36 +196,88 @@ def aggregate_sdpa_metrics(
             rmse = float(np.sqrt(np.mean(diff ** 2)))
             max_err = float(np.max(diff))
 
-        score = float(1.0 / (1.0 + rmse))
+        accuracy_score = float(1.0 / (1.0 + rmse))
         rmses.append(rmse)
         max_abs_errors.append(max_err)
         reported_scores.append(float(reported_score))
-        recomputed_scores.append(score)
+        accuracy_scores.append(accuracy_score)
+
+        # Gather shapes for memory estimation
+        case = CASES[idx]
+        B, H, TQ, D = case["q"].shape
+        TK = case["k"].shape[2]
+
+        # Candidate latency/memory from perf if provided; else estimate
+        if isinstance(perf, dict):
+            cand_latency = float(perf.get("latency_ms", float("nan")))
+            cand_mem = float(perf.get("peak_mem_bytes", _estimate_naive_bytes(B, H, TQ, TK, D)))
+        else:
+            cand_latency = float("nan")
+            cand_mem = float(_estimate_naive_bytes(B, H, TQ, TK, D))
+
+        # Reference latency/memory estimates
+        ref_latency = _time_reference(case["q"], case["k"], case["v"], bool(case["is_causal"]))
+        ref_bytes = float(_estimate_naive_bytes(B, H, TQ, TK, D))
+
+        # Compute ratios and scores
+        if np.isnan(cand_latency) or cand_latency <= 0:
+            speedup = 1.0  # neutral
+        else:
+            speedup = float(ref_latency / cand_latency)
+
+        if cand_mem <= 0:
+            mem_ratio = 1.0
+        else:
+            mem_ratio = float(ref_bytes / cand_mem)
+
+        # Map ratios -> [0,1): s/(1+s) has 0.5 at 1x, asymptote to 1
+        speed_score = float(speedup / (1.0 + speedup))
+        memory_score = float(mem_ratio / (1.0 + mem_ratio))
+
+        combined = SPEED_W * speed_score + MEMORY_W * memory_score + ACCURACY_W * accuracy_score
+
+        cand_latencies_ms.append(cand_latency)
+        ref_latencies_ms.append(ref_latency)
+        speedups.append(speedup)
+        cand_peak_mem.append(cand_mem)
+        ref_mem_est.append(ref_bytes)
+        mem_savings.append(mem_ratio)
 
         extras.append(
             {
                 "case_index": idx,
                 "rmse": rmse,
+                "accuracy_score": accuracy_score,
                 "max_abs_error": max_err,
                 "reported_score": float(reported_score),
-                "recomputed_score": score,
+                "cand_latency_ms": cand_latency,
+                "ref_latency_ms": ref_latency,
+                "speedup": speedup,
+                "cand_peak_mem_bytes": cand_mem,
+                "ref_peak_mem_est_bytes": ref_bytes,
+                "mem_saving_ratio": mem_ratio,
+                "combined_case_score": combined,
             }
         )
 
-    combined = float(np.mean(recomputed_scores))
+    combined_score = float(np.mean([e["combined_case_score"] for e in extras]))
+
     metrics: Dict[str, Any] = {
-        "combined_score": combined,
+        "combined_score": combined_score,
         "public": {
+            "mean_speedup": float(np.mean(speedups)),
+            "mean_mem_saving": float(np.mean(mem_savings)),
+            "mean_cand_latency_ms": float(np.nanmean(cand_latencies_ms)),
             "mean_rmse": float(np.mean(rmses)),
-            "max_rmse": float(np.max(rmses)),
-            "max_abs_error": float(np.max(max_abs_errors)),
         },
         "private": {
+            "weights": {"speed": SPEED_W, "memory": MEMORY_W, "accuracy": ACCURACY_W},
             "mean_reported_score": float(np.mean(reported_scores)),
-            "mean_recomputed_score": float(np.mean(recomputed_scores)),
-            "score_reporting_error": float(
-                np.max(np.abs(np.array(reported_scores) - np.array(recomputed_scores)))
-            ),
+            "mean_accuracy_score": float(np.mean(accuracy_scores)),
+            "max_abs_error": float(np.max(max_abs_errors)),
+            "mean_ref_latency_ms": float(np.mean(ref_latencies_ms)),
+            "mean_cand_peak_mem_bytes": float(np.mean(cand_peak_mem)),
+            "mean_ref_mem_est_bytes": float(np.mean(ref_mem_est)),
         },
         "extra_data": extras,
     }
@@ -187,10 +287,11 @@ def aggregate_sdpa_metrics(
         os.makedirs(results_dir, exist_ok=True)
         np.savez_compressed(
             os.path.join(results_dir, "sdpa_metrics.npz"),
+            speedups=np.array(speedups, dtype=np.float64),
+            mem_savings=np.array(mem_savings, dtype=np.float64),
+            cand_latencies_ms=np.array(cand_latencies_ms, dtype=np.float64),
+            ref_latencies_ms=np.array(ref_latencies_ms, dtype=np.float64),
             rmses=np.array(rmses, dtype=np.float64),
-            reported_scores=np.array(reported_scores, dtype=np.float64),
-            recomputed_scores=np.array(recomputed_scores, dtype=np.float64),
-            max_abs_errors=np.array(max_abs_errors, dtype=np.float64),
         )
     except Exception as exc:  # pragma: no cover
         metrics.setdefault("private", {})["npz_save_error"] = str(exc)
@@ -250,4 +351,3 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args.program_path, args.results_dir)
-
