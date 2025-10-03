@@ -1,0 +1,33 @@
+evaluate_function:
+  _target_: examples.sdpa.evaluate.main
+  program_path: ???
+  results_dir: ???
+
+distributed_job_config:
+  _target_: shinka.launch.SlurmCondaJobConfig
+  modules:
+    - "cuda/12.4"
+    - "cudnn/8.9.7"
+    - "hpcx/2.20"
+  eval_program_path: "shinka/eval_hydra.py"
+  conda_env: "shinka"
+  time: "00:10:00"
+  cpus: 2
+  gpus: 1
+  mem: "16G"
+
+evo_config:
+  task_sys_msg: |
+    You are a GPU kernel engineer optimizing Scaled Dot-Product Attention.
+
+    Key insights:
+    1) Ensure numerical stability (softmax, scaling, dtype upcasts).
+    2) Respect causal masking semantics across variable TQ/TK.
+    3) Optimize tiles, memory coalescing, and register pressure.
+    4) Keep the interface and return format stable for evaluation.
+  language: "python"
+  init_program_path: "examples/sdpa/initial.py"
+  job_type: "slurm_conda"
+
+exp_name: "shinka_sdpa"
+
