@@ -456,7 +456,17 @@ def sdp_attention(
         v2 = v.reshape(B * H, N, D)
         attn = F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal, dropout_p=0.0, scale=scale)
         out = attn.reshape(B, H, M, D)
-        reported_score = {"status": "fallback_torch_sdpa"}
+        bytes_kv = (k.element_size() + v.element_size()) * N * D
+        baseline_bytes_kv = 2 * 2 * N * D
+        byte_saving = max(0.0, float(baseline_bytes_kv - bytes_kv) / baseline_bytes_kv)
+        reported_score = {
+            "ariadne_score": 0.0,
+            "byte_saving_vs_fp16": byte_saving,
+            "k_is_fp8": bool(_is_fp8_dtype(k)),
+            "v_is_fp8": bool(_is_fp8_dtype(v)),
+            "kahan_comp": False,
+            "status": "fallback_torch_sdpa",
+        }
         perf = {"used_triton": False, "device": "cpu"}
         return out, reported_score, perf
 

@@ -11,12 +11,15 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
 
 from shinka.core import run_shinka_eval
+
+BASE_DIR = Path(__file__).resolve().parent
 
 
 def _torch_reference_sdpa(
@@ -452,13 +455,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--program_path",
         type=str,
-        default="initial.py",
+        default=str(BASE_DIR / "initial.py"),
         help="Path to the program containing 'run_ariadne'",
     )
     parser.add_argument(
         "--results_dir",
         type=str,
-        default="results",
+        default=str(BASE_DIR / "results"),
         help="Directory to store metrics and artifacts",
     )
     args = parser.parse_args()

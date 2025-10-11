@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Launch evolutionary search for the Ariadne SDPA example."""
 
+from pathlib import Path
+
 from shinka.core import EvolutionRunner, EvolutionConfig
 from shinka.database import DatabaseConfig
 from shinka.launch import LocalJobConfig
 
-job_config = LocalJobConfig(eval_program_path="evaluate.py")
+BASE_DIR = Path(__file__).resolve().parent
+
+job_config = LocalJobConfig(eval_program_path=str(BASE_DIR / "evaluate.py"))
 
 strategy = "weighted"
 if strategy == "uniform":
@@ -105,8 +109,8 @@ evo_config = EvolutionConfig(
     novelty_llm_kwargs=dict(temperatures=[0.0], max_tokens=16384),
     llm_dynamic_selection="ucb1",
     llm_dynamic_selection_kwargs=dict(exploration_coef=1.0),
-    init_program_path="initial.py",
-    results_dir="results_ariadne_sdpa",
+    init_program_path=str(BASE_DIR / "initial.py"),
+    results_dir=str(BASE_DIR / "results_ariadne_sdpa"),
 )
 
 
