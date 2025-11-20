@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Launch evolutionary search for the Ariadne SDPA example."""
-
-from pathlib import Path
-
 from shinka.core import EvolutionRunner, EvolutionConfig
 from shinka.database import DatabaseConfig
 from shinka.launch import LocalJobConfig
 
-BASE_DIR = Path(__file__).resolve().parent
-
-job_config = LocalJobConfig(eval_program_path=str(BASE_DIR / "evaluate.py"))
+job_config = LocalJobConfig(
+    eval_program_path="evaluate.py",
+    extra_cmd_args={
+        # Keep evaluation lightweight and deterministic.
+        "warmup_iters": 2,
+        "bench_iters": 4,
+        "device": "auto",
+        "dtype": "auto",
+    },
+)
 
 strategy = "weighted"
 if strategy == "uniform":
@@ -35,22 +38,12 @@ elif strategy == "power_law":
         exploitation_alpha=1.0,
         exploitation_ratio=0.2,
     )
-elif strategy == "power_law_high":
-    parent_config = dict(
-        parent_selection_strategy="power_law",
-        exploitation_alpha=2.0,
-        exploitation_ratio=0.2,
-    )
-elif strategy == "beam_search":
-    parent_config = dict(
-        parent_selection_strategy="beam_search",
-        num_beams=10,
-    )
 else:
-    raise ValueError(f"Unsupported strategy: {strategy}")
+    parent_config = dict(parent_selection_strategy="power_law")
+
 
 db_config = DatabaseConfig(
-    db_path="evolution_ariadne_sdpa.sqlite",
+    db_path="evolution_db.sqlite",
     num_islands=2,
     archive_size=40,
     elite_selection_ratio=0.3,
@@ -62,26 +55,27 @@ db_config = DatabaseConfig(
     **parent_config,
 )
 
-search_task_sys_msg = """You are optimizing a streaming scaled dot-product attention kernel.
+search_task_sys_msg = """You are a world-class GPU kernel engineer focused on Triton.
+You must optimize three kernels used in LLM workloads:
+1) fast_rmsnorm (RMSNorm forward/back)
+2) apply_rope_triton (rotary embeddings, forward/back)
+3) fast_relusqr (ReLU squared activation)
 
-Goals:
-- Preserve exactness and numerical stability versus a high-precision SDPA reference.
-- Reduce end-to-end latency and memory pressure, especially for fp8 K/V regimes.
-- Surface accurate performance metadata (latency, bytes) to help the evaluator score improvements.
+Constraints and goals:
+- Preserve numerical correctness against PyTorch references on synthetic LLM-shaped tensors.
+- Optimize for low forward/backward latency and high throughput; evaluation tracks speedups vs PyTorch.
+- Favor FP16/BF16-friendly math while maintaining stability (epsilon handling, safe reductions).
+- Keep autograd compatibility (no silent in-place issues), and avoid excessive memory use.
+- Be explicit about grid/block choices, divergence avoidance, and vectorization.
+- Target Hopper/Ampere-style GPUs but keep code portable across CUDA devices."""
 
-Consider:
-- Tile sizes (BLOCK_M/N/D), warp and stage counts, and persistent row handling.
-- Fusing fp8 scale application, handling per-row scales, and minimizing redundant conversion.
-- Memory hierarchy usage (L1, shared memory) and accumulation stability (Kahan or better).
-- Keeping the run_ariadne interface contract identical: return (outputs, reported_score, perf).
-"""
 
 evo_config = EvolutionConfig(
     task_sys_msg=search_task_sys_msg,
     patch_types=["diff", "full", "cross"],
     patch_type_probs=[0.6, 0.3, 0.1],
-    num_generations=200,
-    max_parallel_jobs=2,
+    num_generations=300,
+    max_parallel_jobs=4,
     max_patch_resamples=3,
     max_patch_attempts=3,
     job_type="local",
@@ -109,12 +103,12 @@ evo_config = EvolutionConfig(
     novelty_llm_kwargs=dict(temperatures=[0.0], max_tokens=16384),
     llm_dynamic_selection="ucb1",
     llm_dynamic_selection_kwargs=dict(exploration_coef=1.0),
-    init_program_path=str(BASE_DIR / "initial.py"),
-    results_dir=str(BASE_DIR / "results_ariadne_sdpa"),
+    init_program_path="initial.py",
+    results_dir="results_kernel_design",
 )
 
 
-def main() -> None:
+def main():
     evo_runner = EvolutionRunner(
         evo_config=evo_config,
         job_config=job_config,
