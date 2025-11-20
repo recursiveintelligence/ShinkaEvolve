@@ -96,6 +96,7 @@ def run_shinka_eval(
     num_valid_runs = 0
     num_invalid_runs = 0
 
+    all_run_results: List[Any] = []
     try:
         module = load_program(program_path)
         if not hasattr(module, experiment_fn_name):
@@ -105,7 +106,6 @@ def run_shinka_eval(
             )
         experiment_fn = getattr(module, experiment_fn_name)
 
-        all_run_results: List[Any] = []
         execution_times: List[float] = []
 
         for i in range(num_runs):
@@ -172,9 +172,7 @@ def run_shinka_eval(
         if validate_fn:
             metrics.setdefault("num_valid_runs", 0)
             # Best guess for invalid runs if an exception occurs mid-evaluation
-            num_potential_runs = num_runs
-            if all_run_results is not None:
-                num_potential_runs = len(all_run_results)
+            num_potential_runs = len(all_run_results)
             metrics.setdefault("num_invalid_runs", num_potential_runs)
             metrics.setdefault("all_validation_errors", [str(e)])
 

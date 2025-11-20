@@ -7,13 +7,27 @@ benchmarks correctness, latency, and FLOPs on synthetic LLM-like tensors.
 """
 
 import argparse
+import importlib.util
+import sys
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import torch
 
-from shinka.core import run_shinka_eval
+# Ensure project root is importable when running as a script.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import run_shinka_eval directly from its module to avoid heavyweight extras.
+WRAP_EVAL_PATH = PROJECT_ROOT / "shinka" / "core" / "wrap_eval.py"
+spec = importlib.util.spec_from_file_location("shinka.core.wrap_eval", WRAP_EVAL_PATH)
+wrap_eval = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(wrap_eval)  # type: ignore
+run_shinka_eval = wrap_eval.run_shinka_eval
 
 
 # -----------------------------------------------------------------------------
@@ -398,7 +412,17 @@ def evaluate_kernel_suite(
 ) -> Dict[str, Any]:
     device = select_device(device_arg)
     if device.type != "cuda":
-        raise RuntimeError("CUDA device is required to benchmark Triton kernels.")
+        # Gracefully skip on non-CUDA hosts so evolution can still run in CPU-only environments.
+        return {
+            "combined_score_run": 0.0,
+            "per_kernel": {},
+            "device": str(device),
+            "dtype": str(resolve_dtype(dtype_arg, device)),
+            "avg_forward_ms": 0.0,
+            "avg_backward_ms": 0.0,
+            "max_error": 0.0,
+            "skipped_reason": "CUDA device is required for Triton kernels.",
+        }
     dtype = resolve_dtype(dtype_arg, device)
 
     inputs = make_llm_like_inputs(device, dtype)
