@@ -23,9 +23,8 @@ job_config = LocalJobConfig(
         "bench_iters": 4,
         "device": "cuda",
         "dtype": "auto",
-        # On hosts without CUDA/Triton, evaluation will return score 0 and still mark correct
-        # to let evolution progress. Set to true to force incorrect on missing deps.
-        "fail_on_missing_deps": False,
+        # Require deps; mark incorrect if missing or if eval errors.
+        "fail_on_missing_deps": True,
     },
 )
 

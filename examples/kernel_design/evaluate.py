@@ -454,6 +454,7 @@ def aggregate_kernel_metrics(
     dtype_arg: str,
     warmup_iters: int,
     bench_iters: int,
+    strict_errors: bool,
 ) -> Dict[str, Any]:
     """Aggregate metrics across runs (usually a single run)."""
     if not results:
@@ -505,6 +506,8 @@ def aggregate_kernel_metrics(
     }
     if errors:
         private_metrics["errors"] = errors
+        if strict_errors:
+            raise RuntimeError("; ".join(errors))
 
     metrics = {
         "combined_score": combined_score,
@@ -559,7 +562,7 @@ def main(
 
     def _aggregate_with_config(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         return aggregate_kernel_metrics(
-            results, device, dtype, warmup_iters, bench_iters
+            results, device, dtype, warmup_iters, bench_iters, fail_on_missing_deps
         )
 
     metrics, correct, error_msg = run_shinka_eval(
@@ -635,8 +638,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fail_on_missing_deps",
         action="store_true",
-        help="If set, mark evaluation incorrect when Triton/CUDA are missing. "
-        "By default, missing deps produce score 0 but are marked correct to keep evolution running.",
+        help="If set, mark evaluation incorrect when Triton/CUDA are missing or when kernel eval errors occur.",
     )
     args = parser.parse_args()
     main(
