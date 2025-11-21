@@ -28,6 +28,7 @@ wrap_eval = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(wrap_eval)  # type: ignore
 run_shinka_eval = wrap_eval.run_shinka_eval
+save_json_results = wrap_eval.save_json_results
 
 
 # -----------------------------------------------------------------------------
@@ -72,8 +73,6 @@ def validate_kernel_suite(run_result: Any) -> Tuple[bool, str | None]:
         fn = run_result.get(name)
         if fn is None or not callable(fn):
             return False, f"Missing callable '{name}' in run_experiment output."
-    if not torch.cuda.is_available():
-        return False, "CUDA device is required to evaluate Triton kernels."
     return True, None
 
 
@@ -465,10 +464,28 @@ def aggregate_kernel_metrics(
         }
 
     run_metrics: List[Dict[str, Any]] = []
+    errors: List[str] = []
     for suite in results:
-        run_metrics.append(
-            evaluate_kernel_suite(suite, device_arg, dtype_arg, warmup_iters, bench_iters)
-        )
+        try:
+            run_metrics.append(
+                evaluate_kernel_suite(
+                    suite, device_arg, dtype_arg, warmup_iters, bench_iters
+                )
+            )
+        except Exception as e:
+            errors.append(str(e))
+            run_metrics.append(
+                {
+                    "combined_score_run": 0.0,
+                    "per_kernel": {},
+                    "device": device_arg,
+                    "dtype": dtype_arg,
+                    "avg_forward_ms": 0.0,
+                    "avg_backward_ms": 0.0,
+                    "max_error": 0.0,
+                    "skipped_reason": f"evaluation error: {e}",
+                }
+            )
 
     combined_score = float(np.mean([rm["combined_score_run"] for rm in run_metrics]))
     avg_forward = float(np.mean([rm["avg_forward_ms"] for rm in run_metrics]))
@@ -486,6 +503,8 @@ def aggregate_kernel_metrics(
     private_metrics = {
         "runs": run_metrics,
     }
+    if errors:
+        private_metrics["errors"] = errors
 
     metrics = {
         "combined_score": combined_score,
@@ -507,6 +526,7 @@ def main(
     num_experiment_runs: int,
     warmup_iters: int,
     bench_iters: int,
+    fail_on_missing_deps: bool,
 ):
     print(f"Evaluating program: {program_path}")
     print(f"Saving results to: {results_dir}")
@@ -515,6 +535,27 @@ def main(
     print(f"Warmup iterations: {warmup_iters}")
     print(f"Benchmark iterations: {bench_iters}")
     print(f"Experiment runs: {num_experiment_runs}")
+
+    # Pre-flight: require Triton and CUDA; write clear results if missing.
+    triton_spec = importlib.util.find_spec("triton")
+    if triton_spec is None or not torch.cuda.is_available():
+        missing = []
+        if triton_spec is None:
+            missing.append("triton")
+        if not torch.cuda.is_available():
+            missing.append("cuda")
+        error = (
+            f"Evaluation skipped: missing dependencies ({', '.join(missing)}). "
+            "Install Triton and ensure a CUDA device for kernel benchmarking."
+        )
+        print(error)
+        metrics = {
+            "combined_score": 0.0,
+            "public": {"error": error},
+            "private": {},
+        }
+        save_json_results(results_dir, metrics, correct=not fail_on_missing_deps, error=error)
+        return
 
     def _aggregate_with_config(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         return aggregate_kernel_metrics(
@@ -591,6 +632,12 @@ if __name__ == "__main__":
         default=4,
         help="Timed iterations for latency measurement.",
     )
+    parser.add_argument(
+        "--fail_on_missing_deps",
+        action="store_true",
+        help="If set, mark evaluation incorrect when Triton/CUDA are missing. "
+        "By default, missing deps produce score 0 but are marked correct to keep evolution running.",
+    )
     args = parser.parse_args()
     main(
         args.program_path,
@@ -600,4 +647,5 @@ if __name__ == "__main__":
         args.num_experiment_runs,
         args.warmup_iters,
         args.bench_iters,
+        args.fail_on_missing_deps,
     )
