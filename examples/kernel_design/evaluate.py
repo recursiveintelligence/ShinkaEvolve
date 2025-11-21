@@ -35,10 +35,15 @@ run_shinka_eval = wrap_eval.run_shinka_eval
 # -----------------------------------------------------------------------------
 
 def select_device(device_arg: str) -> torch.device:
-    """Return requested device, defaulting to CUDA when available."""
+    """Return requested device, requiring CUDA for Triton benchmarks."""
     if device_arg in ("auto", None):
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device_arg)
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        raise RuntimeError("CUDA device is required for kernel benchmark.")
+    dev = torch.device(device_arg)
+    if dev.type != "cuda":
+        raise RuntimeError("CUDA device is required for kernel benchmark.")
+    return dev
 
 
 def resolve_dtype(dtype_arg: str, device: torch.device) -> torch.dtype:
@@ -67,6 +72,8 @@ def validate_kernel_suite(run_result: Any) -> Tuple[bool, str | None]:
         fn = run_result.get(name)
         if fn is None or not callable(fn):
             return False, f"Missing callable '{name}' in run_experiment output."
+    if not torch.cuda.is_available():
+        return False, "CUDA device is required to evaluate Triton kernels."
     return True, None
 
 
@@ -411,18 +418,6 @@ def evaluate_kernel_suite(
     bench_iters: int,
 ) -> Dict[str, Any]:
     device = select_device(device_arg)
-    if device.type != "cuda":
-        # Gracefully skip on non-CUDA hosts so evolution can still run in CPU-only environments.
-        return {
-            "combined_score_run": 0.0,
-            "per_kernel": {},
-            "device": str(device),
-            "dtype": str(resolve_dtype(dtype_arg, device)),
-            "avg_forward_ms": 0.0,
-            "avg_backward_ms": 0.0,
-            "max_error": 0.0,
-            "skipped_reason": "CUDA device is required for Triton kernels.",
-        }
     dtype = resolve_dtype(dtype_arg, device)
 
     inputs = make_llm_like_inputs(device, dtype)
@@ -569,8 +564,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--device",
         type=str,
-        default="auto",
-        help="Device to run on (auto|cuda|cpu). CUDA is required for performance numbers.",
+        default="cuda",
+        help="Device to run on (cuda only; evaluation requires CUDA/Triton).",
     )
     parser.add_argument(
         "--dtype",

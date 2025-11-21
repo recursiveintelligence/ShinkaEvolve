@@ -17,7 +17,7 @@ job_config = LocalJobConfig(
         # Keep evaluation lightweight and deterministic.
         "warmup_iters": 2,
         "bench_iters": 4,
-        "device": "auto",
+        "device": "cuda",
         "dtype": "auto",
     },
 )
